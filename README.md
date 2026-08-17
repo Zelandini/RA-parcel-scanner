@@ -1,40 +1,50 @@
 # RA Parcel Scanner
 
-A Python prototype that reads a parcel label with the Gemini API, extracts the recipient's details as structured data, and searches a local resident directory for the most likely match.
+RA Parcel Scanner is a Python prototype for processing parcel-label images in batches. It uses Gemini to extract the recipient and room information, compares the detected name with a local resident directory, and produces a text report for Resident Adviser review.
 
-The project is intended to reduce the time Resident Advisers spend manually identifying parcel recipients. It currently returns the matched resident's student ID and room so the RA can verify the result and continue the workflow manually in StarRez.
+The report lists unique 100% name matches first. Fuzzy matches, duplicate names, unreadable labels, and processing errors are placed in a manual-review section at the bottom.
 
-> **Status:** Early prototype. The scanner currently processes a saved image rather than a live camera feed.
+> **Status:** Early prototype. It processes saved images from a folder and does not yet provide live camera capture or automatically search StarRez.
 
 ## How it works
 
 ```mermaid
 flowchart TD
-    A[Parcel image] --> B[Gemini vision analysis]
-    B --> C[Structured parcel details]
-    C --> D[Exact name search]
-    D -->|No exact match| E[RapidFuzz comparison]
-    D -->|Match found| F[Resident record]
-    E --> F
-    F --> G[RA verifies student ID and room]
+    A[Images in Input_images] --> B[Convert readable images to JPEG]
+    B --> C[Gemini label extraction]
+    C --> D[Pydantic validation]
+    D --> E[Alias and fuzzy resident search]
+    E --> F{Unique exact name match?}
+    F -->|Yes| G[Confirmed section]
+    F -->|No| H[Manual-review section]
+    G --> I[parcel_results.txt]
+    H --> I
 ```
 
-1. `main.py` reads a parcel image.
-2. Gemini extracts the recipient name, possible room number, address, tracking number, and confidence level.
-3. Pydantic validates the structured response.
-4. pandas searches `residents_lookup.csv` for an exact normalized name match.
-5. If no exact match exists, RapidFuzz finds the closest resident name.
-6. The program displays the resident's name, student ID, room, building, and similarity score.
+1. `main.py` reads every file in `Input_images/`.
+2. Images that are not already JPG files are converted and stored in `Converted_images/`.
+3. `image_reader.py` sends each JPEG to Gemini.
+4. Gemini extracts the recipient name, room details, address, tracking number, and confidence.
+5. Pydantic validates the structured response.
+6. `csv_search.py` compares the detected name against the resident's accepted aliases.
+7. Detected building, room number, and room letter are used as additional ranking evidence when available.
+8. `main.py` writes the complete batch result to `output_lists/parcel_results.txt`.
 
 ## Features
 
-- Parcel-label image understanding with Gemini
-- Structured output validated with Pydantic
-- Exact resident-name lookup with pandas
-- Fuzzy matching for small OCR or spelling differences
-- Configurable similarity threshold
-- Student ID, room, and building retrieval
-- Manual verification before using the result
+- Batch processing from `Input_images/`
+- HEIC and HEIF support for iPhone photos
+- Conversion of Pillow-compatible images to JPEG
+- EXIF orientation correction
+- Safe handling of transparent images
+- Structured Gemini output validated with Pydantic
+- Preferred-name, legal-name, and alias matching
+- RapidFuzz comparison for OCR and spelling differences
+- Optional building, room-number, room-letter, and phone evidence in the search function
+- Unique exact matches separated from results requiring manual review
+- Student ID, resident name, room, building, and phone retrieval
+- One predictable text report per scan run
+- Automatic deletion of the original HEIC or HEIF only after successful processing
 
 ## Technology
 
@@ -44,17 +54,26 @@ flowchart TD
 - Pydantic
 - pandas
 - RapidFuzz
+- Pillow
+- pillow-heif
 
 ## Project structure
 
 ```text
 RA-parcel-scanner/
-├── main.py             # Reads the image and requests structured Gemini output
-├── csv_search.py       # Searches the resident CSV and performs fuzzy matching
-├── test.py             # Simple resident-search test
-├── residents_lookup.csv # Local resident data; do not commit this file
-└── IMG_9911.jpg        # Local test image; replace with your own safe test image
+├── Input_images/                         # Parcel images waiting to be processed
+├── Converted_images/                     # Generated JPEG versions
+├── output_lists/
+│   └── parcel_results.txt                # Generated batch report
+├── main.py                               # Batch processing and report creation
+├── image_reader.py                       # Gemini extraction and validation
+├── csv_search.py                         # Resident matching and ranking
+├── test.py                               # Development test script
+├── residents_lookup_enriched_no_spaces.csv  # Local resident directory
+└── .gitignore                            # Prevents private data from being committed
 ```
+
+The image, resident-data, converted-image, and output directories are local and ignored by Git.
 
 ## Setup
 
@@ -63,6 +82,12 @@ RA-parcel-scanner/
 ```bash
 git clone https://github.com/Zelandini/RA-parcel-scanner.git
 cd RA-parcel-scanner
+```
+
+If the current changes are still in the draft pull request, check out its branch:
+
+```bash
+git checkout agent/output-match-report
 ```
 
 ### 2. Create a virtual environment
@@ -81,10 +106,10 @@ python -m venv .venv
 .venv\Scripts\Activate.ps1
 ```
 
-### 3. Install the dependencies
+### 3. Install dependencies
 
 ```bash
-pip install google-genai pydantic pandas rapidfuzz
+pip install google-genai pydantic pandas rapidfuzz Pillow pillow-heif
 ```
 
 ### 4. Configure the Gemini API key
@@ -107,24 +132,39 @@ Do not place the API key directly in the source code or commit it to GitHub.
 
 ### 5. Prepare the resident lookup CSV
 
-Create a local file named `residents_lookup.csv` in the project directory. The current search code expects these columns:
-
-```csv
-student_id,full_name,search_name,first_name,last_name,room,room_short,building
-123456789,Alex Example,alex example,Alex,Example,831-105B,105B,831
-```
-
-The `search_name` value should be a normalized lowercase version of `full_name`.
-
-### 6. Add a parcel image
-
-Place a safe test image in the project directory and name it:
+Place the following file in the project directory:
 
 ```text
-IMG_9911.jpg
+residents_lookup_enriched_no_spaces.csv
 ```
 
-Alternatively, update the image path near the top of `main.py`.
+The search code uses these columns:
+
+```csv
+student_id,full_name,legal_full_name,search_name,legal_search_name,search_aliases,phone_number,room,room_short,building
+123456789,Alex Example,Alexander Example,alex example,alexander example,alex example|alexander example,0211234567,831-105B,105B,831
+```
+
+`search_aliases` contains normalized names separated by `|`. It can contain preferred, legal, and other accepted versions of the resident's name.
+
+### 6. Add parcel images
+
+Create the input directory if it does not exist:
+
+```bash
+mkdir Input_images
+```
+
+Place the parcel images inside it:
+
+```text
+Input_images/
+├── parcel_001.heic
+├── parcel_002.jpg
+└── parcel_003.png
+```
+
+The program attempts to open any format supported by Pillow and `pillow-heif`. Files it cannot recognise are reported as errors without stopping the rest of the batch.
 
 ### 7. Run the scanner
 
@@ -132,79 +172,120 @@ Alternatively, update the image path near the top of `main.py`.
 python main.py
 ```
 
-Example result:
+After processing, open:
 
 ```text
-Possible resident found!
-Name: Alex Example
-Student ID: 123456789
-Room: 831-105B
-Building: 831
-Similarity: 96.0
+output_lists/parcel_results.txt
+```
+
+The report is replaced each time `main.py` runs.
+
+## Example report
+
+```text
+PARCEL RESIDENT MATCHES
+Generated: 2026-08-17 18:45:14 NZST
+
+CONFIRMED 100% MATCHES
+Student ID | Name | Room Number
+------------------------------------------------------------------------
+123456789 | Alex Example | 831-105B
+
+UNSURE OR NOT FOUND — MANUAL REVIEW REQUIRED
+------------------------------------------------------------------------
+Image: parcel_002.jpg
+Detected name: Alx Example
+Status: Unsure
+Reason: The best name match is below 100%.
+Best candidate: 123456789 | Alex Example | 831-105B | 96.0%
 ```
 
 ## Resident matching
 
-The search follows two stages:
+### Name aliases
 
-### Exact match
+The detected recipient name is compared with every alias in `search_aliases`. If that column is empty, the search falls back to `search_name`, `legal_search_name`, `full_name`, and `legal_full_name`.
 
-The normalized name returned by Gemini is compared directly with the CSV's `search_name` column.
+RapidFuzz uses both `fuzz.ratio()` and `fuzz.token_sort_ratio()`. A resident must currently score at least 65 to remain a possible candidate.
 
-### Fuzzy match
+### Confirmed match
 
-If no exact match exists, `fuzz.ratio()` compares the detected name with every resident name. The current minimum similarity score is:
+A result is placed in the confirmed section only when:
 
-```python
-best_score >= 85
-```
+- The detected name exactly matches an accepted resident alias.
+- The name similarity is 100%.
+- Exactly one resident has that exact match.
 
-A fuzzy result should always be treated as a possible match and manually verified against the parcel and resident system.
+If multiple residents share the same exact name, the result remains unsure.
+
+### Additional evidence
+
+When Gemini detects them, the following fields adjust candidate ranking:
+
+- Building number
+- Room number
+- Room letter
+
+`search_csv()` can also accept a phone number, but the current Gemini extraction does not extract or pass a recipient phone number.
+
+Additional evidence helps rank possible candidates. It does not turn a fuzzy name into a confirmed 100% name match.
+
+### Manual review
+
+The bottom section contains:
+
+- Fuzzy matches below 100%
+- Duplicate exact names
+- Recipient names that cannot be found
+- Labels where no recipient name was detected
+- Image conversion failures
+- Gemini, validation, or other processing errors
+
+## Image handling
+
+- Existing `.jpg` files are processed directly.
+- Other readable formats are converted into `Converted_images/`.
+- Animated images use their first frame.
+- Phone-camera orientation is corrected using EXIF metadata.
+- Transparent images receive a white background before JPEG conversion.
+- Original HEIC and HEIF files are deleted only after conversion and parcel processing succeed.
+- Other original image formats are retained.
 
 ## Privacy and security
 
-This project may process personal information, including names, addresses, student IDs, room numbers, tracking numbers, and parcel images.
+This project can process names, addresses, student IDs, room numbers, phone numbers, tracking numbers, and parcel images.
 
-- Use fake, personal, or properly authorized test data during development.
-- Do not commit the real resident lookup CSV.
-- Do not commit genuine parcel-label images.
-- Do not commit API keys.
+- Use fake, personal, or properly authorised data during development.
+- Never commit the resident lookup CSV.
+- Never commit genuine parcel-label images.
+- Never commit generated reports.
+- Never commit API keys or `.env` files.
 - Keep resident data only for as long as operationally necessary.
-- Confirm that any real-world use follows university and accommodation privacy requirements.
-- Always require human verification before acting on a match.
+- Follow university and accommodation privacy requirements.
+- Manually verify a result before taking action in StarRez or another resident system.
 
-The following entries should be added to `.gitignore`:
-
-```gitignore
-.venv/
-.idea/
-.env
-residents_lookup.csv
-*.xlsx
-IMG_*.jpg
-__pycache__/
-```
+The included `.gitignore` excludes resident CSVs, parcel images, converted images, generated reports, virtual environments, and environment files. Files committed before the ignore rules were added remain tracked until they are removed from Git history or the repository.
 
 ## Current limitations
 
-- Processes one saved image at a time
-- Uses a fixed local image filename
-- Prints results to the terminal
-- Does not yet use the detected room as a secondary matching signal
-- Does not automatically open or search StarRez
-- Fuzzy-match thresholds still require testing with a larger set of parcel labels
-- Requires manual confirmation of every result
+- No live camera or webcam capture
+- No automatic label cropping or image-quality check
+- No automatic StarRez search or update
+- Phone matching is available in the search function but is not connected to Gemini extraction
+- Matching thresholds require testing against a larger, authorised parcel dataset
+- Gemini confidence and room evidence do not override the exact-name confirmation rule
+- Human verification is still required before acting on a result
 
 ## Possible next steps
 
-- Capture parcel images from a webcam
-- Add automatic image cropping and sharpness checks
-- Use room information to disambiguate residents with similar names
-- Return the three strongest candidates instead of one
-- Add a simple desktop or web interface
-- Record anonymous accuracy and response-time measurements
-- Add automated tests for exact and fuzzy matching
-- Move configuration such as filenames and thresholds into environment variables
+- Add live camera capture
+- Add automatic label detection, cropping, and sharpness checks
+- Extract recipient phone numbers when clearly visible
+- Display all three possible candidates in the report
+- Add a desktop or web interface
+- Add anonymous accuracy and response-time measurements
+- Add automated tests for matching, image handling, and report generation
+- Move filenames, thresholds, and the Gemini model into configuration
 
 ## Disclaimer
 
