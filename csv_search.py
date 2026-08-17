@@ -1,6 +1,11 @@
 import re
+
 import pandas as pd
 from rapidfuzz import fuzz
+
+
+RESIDENTS_CSV = "residents_lookup_enriched_no_spaces.csv"
+MINIMUM_NAME_SCORE = 65
 
 
 def clean_text(value):
@@ -10,7 +15,7 @@ def clean_text(value):
 
 
 def clean_phone(value):
-    """Remove spaces, brackets, dashes, etc."""
+    """Remove spaces, brackets, dashes, and other non-digits."""
     return re.sub(r"\D", "", clean_text(value))
 
 
@@ -21,13 +26,11 @@ def phones_match(phone_1, phone_2):
     if not phone_1 or not phone_2:
         return False
 
-    # Exact match
     if phone_1 == phone_2:
         return True
 
-    # Allows formats such as:
-    # 021 123 4567 and +64 21 123 4567
-    return phone_1[-7:] == phone_2[-7:]
+    # Handles local and international formats with different prefixes.
+    return len(phone_1) >= 7 and len(phone_2) >= 7 and phone_1[-7:] == phone_2[-7:]
 
 
 def clean_room_number(value):
@@ -37,8 +40,9 @@ def clean_room_number(value):
 
 
 def clean_room_letter(value):
-    """Keep only the room letter."""
-    return re.sub(r"[^a-z]", "", clean_text(value)).upper()
+    """Return the final letter in a room value, if one exists."""
+    letters = re.findall(r"[a-z]", clean_text(value))
+    return letters[-1].upper() if letters else ""
 
 
 def get_aliases(resident):
@@ -47,7 +51,6 @@ def get_aliases(resident):
     if aliases:
         return [alias.strip() for alias in aliases.split("|") if alias.strip()]
 
-    # Fallback when search_aliases is unavailable
     possible_names = [
         resident.get("search_name", ""),
         resident.get("legal_search_name", ""),
@@ -55,11 +58,7 @@ def get_aliases(resident):
         resident.get("legal_full_name", ""),
     ]
 
-    return [
-        clean_text(name)
-        for name in possible_names
-        if clean_text(name)
-    ]
+    return [clean_text(name) for name in possible_names if clean_text(name)]
 
 
 def calculate_name_score(resident, search_name):
@@ -77,6 +76,18 @@ def calculate_name_score(resident, search_name):
     )
 
 
+def resident_details(resident):
+    """Convert the resident row into plain values suitable for a report."""
+    return {
+        "student_id": str(resident.get("student_id", "")),
+        "full_name": str(resident.get("full_name", "")),
+        "legal_full_name": str(resident.get("legal_full_name", "")),
+        "room": str(resident.get("room", "")),
+        "building": str(resident.get("building", "")),
+        "phone_number": str(resident.get("phone_number", "")),
+    }
+
+
 def search_csv(
     search_name,
     building_number=None,
@@ -84,38 +95,50 @@ def search_csv(
     room_letter=None,
     phone_number=None,
 ):
-    df = pd.read_csv(
-        "residents_lookup_enriched_no_spaces.csv",
-        dtype=str,
-        keep_default_na=False,
-    )
+    """
+    Search for a resident and return a structured result.
 
-    search_name = clean_text(search_name)
+    A confirmed result requires exactly one resident whose accepted name alias
+    matches the detected name at 100%. Fuzzy and duplicate exact matches are
+    returned as unsure so a person can review them.
+    """
+    df = pd.read_csv(RESIDENTS_CSV, dtype=str, keep_default_na=False)
+    detected_name = str(search_name or "").strip()
+    normalized_name = clean_text(detected_name)
+
+    if not normalized_name:
+        return {
+            "status": "not_found",
+            "detected_name": detected_name,
+            "reason": "No recipient name was detected.",
+            "resident": None,
+            "name_score": 0.0,
+            "evidence": "none",
+            "candidates": [],
+        }
 
     results = []
 
     for index, resident in df.iterrows():
-        name_score = calculate_name_score(resident, search_name)
+        aliases = get_aliases(resident)
+        name_score = calculate_name_score(resident, normalized_name)
 
-        # Name remains the main requirement
-        if name_score < 65:
+        if name_score < MINIMUM_NAME_SCORE:
             continue
 
         evidence_score = 0
         evidence = []
 
-        # Building check
         if building_number:
-            if clean_text(resident["building"]) == clean_text(building_number):
+            if clean_text(resident.get("building", "")) == clean_text(building_number):
                 evidence_score += 8
                 evidence.append("building matched")
             else:
                 evidence_score -= 4
                 evidence.append("building different")
 
-        # Room-number check
         if room_number:
-            csv_room = clean_room_number(resident["room_short"])
+            csv_room = clean_room_number(resident.get("room_short", ""))
             detected_room = clean_room_number(room_number)
 
             if csv_room == detected_room:
@@ -125,82 +148,97 @@ def search_csv(
                 evidence_score -= 6
                 evidence.append("room different")
 
-        # Room-letter check
         if room_letter:
-            csv_letter = clean_room_letter(resident["room_short"])
+            csv_letter = clean_room_letter(resident.get("room_short", ""))
             detected_letter = clean_room_letter(room_letter)
 
-            if csv_letter.endswith(detected_letter):
+            if csv_letter == detected_letter:
                 evidence_score += 4
                 evidence.append("room letter matched")
             else:
                 evidence_score -= 2
                 evidence.append("room letter different")
 
-        # Phone check, when a phone was detected on the label
         if phone_number:
-            if phones_match(resident["phone_number"], phone_number):
+            if phones_match(resident.get("phone_number", ""), phone_number):
                 evidence_score += 15
                 evidence.append("phone matched")
             else:
                 evidence_score -= 4
                 evidence.append("phone different")
 
-        results.append({
-            "index": index,
-            "name_score": round(name_score, 1),
-            "evidence_score": evidence_score,
-            "final_score": round(name_score + evidence_score, 1),
-            "evidence": ", ".join(evidence) or "name only",
-        })
-
-    if not results:
-        print("No reliable resident found for:\n", search_name)
-        return None
-
-    ranked = pd.DataFrame(results).sort_values(
-        "final_score",
-        ascending=False,
-    )
-
-    best_result = ranked.iloc[0]
-    resident = df.loc[int(best_result["index"])]
-
-    print("Best resident match")
-    print("Name:", resident["full_name"])
-    print("Legal name:", resident["legal_full_name"])
-    print("Student ID:", resident["student_id"])
-    print("Room:", resident["room"])
-    print("Building:", resident["building"])
-    print("Phone:", resident["phone_number"])
-    print("Name similarity:", best_result["name_score"])
-    print("Additional evidence:", best_result["evidence"])
-    print("Final score:", best_result["final_score"])
-
-    # Show alternatives when the top results are very close
-    if len(ranked) > 1:
-        difference = (
-            ranked.iloc[0]["final_score"]
-            - ranked.iloc[1]["final_score"]
+        results.append(
+            {
+                "index": int(index),
+                "exact_match": normalized_name in aliases,
+                "name_score": round(float(name_score), 1),
+                "evidence_score": evidence_score,
+                "final_score": round(float(name_score + evidence_score), 1),
+                "evidence": ", ".join(evidence) or "name only",
+            }
         )
 
-        if difference < 5:
-            print("\nWarning: match is ambiguous.")
-            print("Top candidates:")
+    if not results:
+        print("No reliable resident found for:", detected_name)
+        return {
+            "status": "not_found",
+            "detected_name": detected_name,
+            "reason": "No resident reached the minimum name similarity.",
+            "resident": None,
+            "name_score": 0.0,
+            "evidence": "none",
+            "candidates": [],
+        }
 
-            candidate_indexes = ranked.head(3)["index"].astype(int)
-            print(
-                df.loc[
-                    candidate_indexes,
-                    [
-                        "full_name",
-                        "legal_full_name",
-                        "student_id",
-                        "room",
-                        "building",
-                        "phone_number",
-                    ],
-                ]
-            )
+    ranked = pd.DataFrame(results).sort_values(
+        ["final_score", "name_score"],
+        ascending=False,
+    )
+    best_result = ranked.iloc[0]
+    best_resident = df.loc[int(best_result["index"])]
 
-    return resident
+    candidates = []
+    for _, candidate_result in ranked.head(3).iterrows():
+        candidate_resident = df.loc[int(candidate_result["index"])]
+        candidate = resident_details(candidate_resident)
+        candidate["name_score"] = float(candidate_result["name_score"])
+        candidate["evidence"] = str(candidate_result["evidence"])
+        candidates.append(candidate)
+
+    exact_matches = ranked[
+        (ranked["exact_match"] == True) & (ranked["name_score"] == 100.0)  # noqa: E712
+    ]
+
+    if len(exact_matches) == 1:
+        exact_result = exact_matches.iloc[0]
+        resident = df.loc[int(exact_result["index"])]
+        status = "confirmed"
+        reason = "Unique 100% name match."
+        selected_result = exact_result
+    else:
+        resident = best_resident
+        status = "unsure"
+        selected_result = best_result
+        if len(exact_matches) > 1:
+            reason = "More than one resident has the same exact name."
+        else:
+            reason = "The best name match is below 100%."
+
+    details = resident_details(resident)
+
+    print("Confirmed resident match" if status == "confirmed" else "Possible resident match")
+    print("Name:", details["full_name"])
+    print("Student ID:", details["student_id"])
+    print("Room:", details["room"])
+    print("Name similarity:", selected_result["name_score"])
+    print("Additional evidence:", selected_result["evidence"])
+
+    return {
+        "status": status,
+        "detected_name": detected_name,
+        "reason": reason,
+        "resident": details,
+        "name_score": float(selected_result["name_score"]),
+        "evidence": str(selected_result["evidence"]),
+        "candidates": candidates,
+    }
