@@ -1,0 +1,32 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Resident data and generated output
+*.csv
+*.xlsx
+Input_images/
+Converted_images/
+output_lists/
+
+# Parcel images
+*.heic
+*.heif
+*.jpg
+*.jpeg
+*.png
+*.webp
+*.tif
+*.tiff
+*.bmp
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
